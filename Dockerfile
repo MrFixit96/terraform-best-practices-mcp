@@ -1,9 +1,8 @@
-# Build stage
-FROM golang:1.19-alpine AS build
+FROM golang:1.19-alpine AS builder
 
 WORKDIR /app
 
-# Copy go.mod and go.sum
+# Copy go mod and sum files
 COPY go.mod go.sum ./
 
 # Download dependencies
@@ -13,29 +12,27 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o terraform-mcp-server ./cmd/terraform-mcp-server
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o terraform-mcp-server ./cmd/terraform-mcp-server
 
-# Final stage
-FROM alpine:3.17
+# Use a small alpine image for the final container
+FROM alpine:latest
 
 WORKDIR /app
 
-# Copy the binary from the build stage
-COPY --from=build /app/terraform-mcp-server /app/terraform-mcp-server
+# Copy the binary from the builder image
+COPY --from=builder /app/terraform-mcp-server .
 
-# Create data directories
-RUN mkdir -p /app/data/docs
-RUN mkdir -p /app/data/patterns
+# Create data directory
+RUN mkdir -p /app/data
 
-# Copy example data if available
-COPY --from=build /app/data/docs /app/data/docs
-COPY --from=build /app/data/patterns /app/data/patterns
+# Set environment variables
+ENV ADDR=:8080
+ENV DATA_DIR=/app/data
+ENV LOG_LEVEL=info
 
-# Expose the default port
+# Expose the port
 EXPOSE 8080
 
-# Set the entrypoint
-ENTRYPOINT ["/app/terraform-mcp-server"]
-
-# Default command line arguments
-CMD ["-addr", ":8080", "-data-dir", "/app/data", "-log-level", "info"]
+# Run the application
+ENTRYPOINT ["./terraform-mcp-server", "-addr", "${ADDR}", "-data-dir", "${DATA_DIR}", "-log-level", "${LOG_LEVEL}"]
+</content>
