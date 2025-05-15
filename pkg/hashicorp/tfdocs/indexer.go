@@ -7,447 +7,652 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Default authority sources for Terraform best practices
-var DefaultAuthoritySources = []string{
-	"https://developer.hashicorp.com/terraform/language/modules/develop",
-	"https://developer.hashicorp.com/terraform/language/style",
-	"https://developer.hashicorp.com/validated-designs/terraform-operating-guides-adoption/terraform-workflows",
-	"https://developer.hashicorp.com/terraform/tutorials/pro-cert/pro-review",
+// ResourceType represents a type of resource
+type ResourceType string
+
+const (
+	ResourceTypeBestPractice   ResourceType = "bestpractice"
+	ResourceTypeModuleStructure ResourceType = "modulestructure"
+)
+
+// Resource represents a documentation resource
+type Resource struct {
+	URI     string          `json:"uri"`
+	Type    ResourceType    `json:"type"`
+	Content json.RawMessage `json:"content"`
 }
 
-// Document represents a documentation document for Terraform best practices
-type Document struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Content     string            `json:"content"`
-	URL         string            `json:"url"`
-	Category    string            `json:"category"`
-	Tags        []string          `json:"tags"`
-	Metadata    map[string]string `json:"metadata"`
-	LastUpdated time.Time         `json:"last_updated"`
+// BestPractice represents a Terraform best practice
+type BestPracticeDoc struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Category    string   `json:"category"`
+	Description string   `json:"description"`
+	Content     string   `json:"content"`
+	Provider    string   `json:"provider,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	References  []string `json:"references,omitempty"`
 }
 
-// Indexer is responsible for indexing Terraform documentation
-type Indexer struct {
-	documents       map[string]Document
-	categories      map[string][]string
-	tags            map[string][]string
-	mu              sync.RWMutex
-	sourcePath      string
-	updateInterval  time.Duration
-	updateTicker    *time.Ticker
-	logger          Logger
-	lastIndexed     time.Time
-	indexingActive  bool
-	authoritySources []string
+// ModuleStructureFile represents a file in a module structure
+type ModuleStructureFile struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+	Content     string `json:"content,omitempty"`
 }
 
-// Logger defines a simple interface for logging
-type Logger interface {
-	Info(msg string, fields ...interface{})
-	Error(msg string, fields ...interface{})
-	Debug(msg string, fields ...interface{})
+// ModuleStructureDoc represents a Terraform module structure
+type ModuleStructureDoc struct {
+	Type        string               `json:"type"`
+	Description string               `json:"description"`
+	Files       []ModuleStructureFile `json:"files"`
+	Examples    []string             `json:"examples,omitempty"`
+	Provider    string               `json:"provider,omitempty"`
+	References  []string             `json:"references,omitempty"`
 }
 
-// IndexerOption configures the Indexer
+// IndexerOption is a function that configures an Indexer
 type IndexerOption func(*Indexer)
 
-// WithUpdateInterval sets the update interval
+// WithUpdateInterval sets the update interval for the indexer
 func WithUpdateInterval(interval time.Duration) IndexerOption {
 	return func(i *Indexer) {
 		i.updateInterval = interval
 	}
 }
 
-// WithAuthoritySources sets the authority sources
+// WithAuthoritySources sets the authority sources for the indexer
 func WithAuthoritySources(sources []string) IndexerOption {
 	return func(i *Indexer) {
-		if len(sources) > 0 {
-			i.authoritySources = sources
-		}
+		i.authoritySources = sources
 	}
 }
 
-// NewIndexer creates a new documentation indexer
-func NewIndexer(sourcePath string, logger Logger, opts ...IndexerOption) *Indexer {
-	i := &Indexer{
-		documents:      make(map[string]Document),
-		categories:     make(map[string][]string),
-		tags:           make(map[string][]string),
-		sourcePath:     sourcePath,
-		logger:         logger,
-		updateInterval: 24 * time.Hour,
+// Indexer manages the indexing of Terraform documentation
+type Indexer struct {
+	docSourcePath    string
+	resources        map[string]*Resource
+	authoritySources []string
+	updateInterval   time.Duration
+	mutex            sync.RWMutex
+	logger           Logger
+}
+
+// NewIndexer creates a new indexer
+func NewIndexer(docSourcePath string, logger Logger, options ...IndexerOption) *Indexer {
+	indexer := &Indexer{
+		docSourcePath:    docSourcePath,
+		resources:        make(map[string]*Resource),
 		authoritySources: DefaultAuthoritySources,
+		updateInterval:   24 * time.Hour,
+		logger:           logger,
 	}
-	
-	for _, opt := range opts {
-		opt(i)
+
+	// Apply options
+	for _, option := range options {
+		option(indexer)
 	}
-	
-	return i
+
+	return indexer
 }
 
-// Start begins the indexing process and periodic updates
-func (i *Indexer) Start(ctx context.Context) error {
-	i.logger.Info("Starting documentation indexer", "sourcePath", i.sourcePath)
-	
-	if err := i.Index(ctx); err != nil {
-		return fmt.Errorf("initial indexing failed: %w", err)
+// Initialize initializes the indexer
+func (i *Indexer) Initialize(ctx context.Context) error {
+	i.logger.Info("Initializing documentation indexer", "path", i.docSourcePath)
+
+	// Create doc source directory if it doesn't exist
+	if err := os.MkdirAll(i.docSourcePath, 0755); err != nil {
+		return fmt.Errorf("failed to create doc source directory: %w", err)
 	}
-	
-	i.updateTicker = time.NewTicker(i.updateInterval)
-	go func() {
-		for {
-			select {
-			case <-i.updateTicker.C:
-				i.logger.Debug("Running scheduled index update")
-				if err := i.Index(ctx); err != nil {
-					i.logger.Error("Scheduled index update failed", "error", err)
-				}
-			case <-ctx.Done():
-				i.logger.Info("Stopping documentation indexer")
-				i.updateTicker.Stop()
-				return
-			}
-		}
-	}()
-	
+
+	// Check if index file exists
+	indexPath := filepath.Join(i.docSourcePath, "index.json")
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		i.logger.Info("Index file not found, initializing with default documentation")
+		return i.initializeDefaultDocs(ctx)
+	}
+
+	// Load index file
+	data, err := ioutil.ReadFile(indexPath)
+	if err != nil {
+		return fmt.Errorf("failed to read index file: %w", err)
+	}
+
+	var resources map[string]*Resource
+	if err := json.Unmarshal(data, &resources); err != nil {
+		return fmt.Errorf("failed to unmarshal index file: %w", err)
+	}
+
+	i.mutex.Lock()
+	i.resources = resources
+	i.mutex.Unlock()
+
+	i.logger.Info("Documentation indexer initialized", "resourceCount", len(resources))
 	return nil
 }
 
-// Index indexes the documentation from the source path
-func (i *Indexer) Index(ctx context.Context) error {
-	i.mu.Lock()
-	if i.indexingActive {
-		i.mu.Unlock()
-		i.logger.Debug("Indexing already in progress, skipping")
+// initializeDefaultDocs initializes the indexer with default documentation
+func (i *Indexer) initializeDefaultDocs(ctx context.Context) error {
+	i.logger.Info("Fetching documentation from authority sources", "count", len(i.authoritySources))
+
+	// Create a channel for best practices
+	bestPractices := make(chan BestPracticeDoc)
+	moduleStructures := make(chan ModuleStructureDoc)
+	errCh := make(chan error, len(i.authoritySources))
+
+	// Start workers to fetch documentation
+	var wg sync.WaitGroup
+	for _, source := range i.authoritySources {
+		wg.Add(1)
+		go func(source string) {
+			defer wg.Done()
+			if err := i.fetchDocumentation(ctx, source, bestPractices, moduleStructures); err != nil {
+				errCh <- fmt.Errorf("failed to fetch documentation from %s: %w", source, err)
+			}
+		}(source)
+	}
+
+	// Close channels when all workers are done
+	go func() {
+		wg.Wait()
+		close(bestPractices)
+		close(moduleStructures)
+		close(errCh)
+	}()
+
+	// Initialize resources map
+	i.mutex.Lock()
+	defer i.mutex.Unlock()
+
+	i.resources = make(map[string]*Resource)
+
+	// Process best practices
+	for practice := range bestPractices {
+		// Generate URI
+		uri := fmt.Sprintf("%s:%s/%s", ResourceTypeBestPractice, practice.Category, practice.ID)
+
+		// Marshal to JSON
+		content, err := json.Marshal(practice)
+		if err != nil {
+			i.logger.Error("Failed to marshal best practice", "id", practice.ID, "error", err)
+			continue
+		}
+
+		// Add to resources
+		i.resources[uri] = &Resource{
+			URI:     uri,
+			Type:    ResourceTypeBestPractice,
+			Content: content,
+		}
+	}
+
+	// Process module structures
+	for structure := range moduleStructures {
+		// Generate URI
+		provider := structure.Provider
+		if provider == "" {
+			provider = "generic"
+		}
+		uri := fmt.Sprintf("%s:%s/%s", ResourceTypeModuleStructure, provider, structure.Type)
+
+		// Marshal to JSON
+		content, err := json.Marshal(structure)
+		if err != nil {
+			i.logger.Error("Failed to marshal module structure", "type", structure.Type, "error", err)
+			continue
+		}
+
+		// Add to resources
+		i.resources[uri] = &Resource{
+			URI:     uri,
+			Type:    ResourceTypeModuleStructure,
+			Content: content,
+		}
+	}
+
+	// Check for errors
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("encountered %d errors while fetching documentation: %v", len(errs), errs)
+	}
+
+	// Generate default resources if no documentation was fetched
+	if len(i.resources) == 0 {
+		i.generateDefaultResources()
+	}
+
+	// Save index file
+	indexPath := filepath.Join(i.docSourcePath, "index.json")
+	indexData, err := json.MarshalIndent(i.resources, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal index file: %w", err)
+	}
+
+	if err := ioutil.WriteFile(indexPath, indexData, 0644); err != nil {
+		return fmt.Errorf("failed to write index file: %w", err)
+	}
+
+	i.logger.Info("Documentation initialized with default resources", "count", len(i.resources))
+	return nil
+}
+
+// fetchDocumentation fetches documentation from a source URL
+func (i *Indexer) fetchDocumentation(ctx context.Context, source string, bestPractices chan<- BestPracticeDoc, moduleStructures chan<- ModuleStructureDoc) error {
+	i.logger.Debug("Fetching documentation", "source", source)
+
+	// For now, we'll use a simple approach and just check if the source starts with http
+	if strings.HasPrefix(source, "http") {
+		// TODO: Implement HTTP fetching
+		// This is a placeholder for future implementation
 		return nil
 	}
-	
-	i.indexingActive = true
-	i.mu.Unlock()
-	
-	defer func() {
-		i.mu.Lock()
-		i.indexingActive = false
-		i.mu.Unlock()
-	}()
-	
-	i.logger.Info("Indexing documentation", "sourcePath", i.sourcePath)
-	
-	// First, try loading from the file system
-	newDocs, err := i.loadFromFileSystem()
-	if err != nil {
-		i.logger.Error("Failed to load from file system", "error", err)
-		// Continue anyway, we might have web sources
-	}
-	
-	// Then, try to fetch from authority web sources
-	webDocs, err := i.fetchFromAuthoritySources(ctx)
-	if err != nil {
-		i.logger.Error("Failed to fetch from web sources", "error", err)
-		// Continue anyway, we might have file sources
-	}
-	
-	// Merge the documents
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	
-	// Reset the collections
-	i.documents = make(map[string]Document)
-	i.categories = make(map[string][]string)
-	i.tags = make(map[string][]string)
-	
-	// Add file system documents
-	for id, doc := range newDocs {
-		i.documents[id] = doc
-	}
-	
-	// Add web documents, potentially overriding file system documents
-	for id, doc := range webDocs {
-		i.documents[id] = doc
-	}
-	
-	// Rebuild category and tag indices
-	for id, doc := range i.documents {
-		if _, exists := i.categories[doc.Category]; !exists {
-			i.categories[doc.Category] = []string{}
-		}
-		i.categories[doc.Category] = append(i.categories[doc.Category], id)
-		
-		for _, tag := range doc.Tags {
-			if _, exists := i.tags[tag]; !exists {
-				i.tags[tag] = []string{}
-			}
-			i.tags[tag] = append(i.tags[tag], id)
-		}
-	}
-	
-	i.lastIndexed = time.Now()
-	i.logger.Info("Indexing complete", "documentCount", len(i.documents), "authoritySources", len(i.authoritySources))
-	
+
+	// Otherwise, assume it's a local file
+	// TODO: Implement local file loading
+	// This is a placeholder for future implementation
 	return nil
 }
 
-// loadFromFileSystem loads documents from the file system
-func (i *Indexer) loadFromFileSystem() (map[string]Document, error) {
-	docs := make(map[string]Document)
-	
-	files, err := ioutil.ReadDir(i.sourcePath)
+// generateDefaultResources creates default resources when no documentation is available
+func (i *Indexer) generateDefaultResources() {
+	i.logger.Info("Generating default resources")
+
+	// Add default best practices
+	i.addDefaultBestPractices()
+
+	// Add default module structures
+	i.addDefaultModuleStructures()
+}
+
+// addDefaultBestPractices adds default best practices
+func (i *Indexer) addDefaultBestPractices() {
+	// Module structure best practice
+	moduleStructurePractice := BestPracticeDoc{
+		ID:          "module-structure",
+		Title:       "Standard Module Structure",
+		Category:    "structure",
+		Description: "Follow the standard module structure for Terraform modules",
+		Content:     "Terraform modules should follow a standard structure with main.tf, variables.tf, outputs.tf, and README.md. This makes modules easier to understand, use, and maintain. The main.tf file should contain the primary resources, variables.tf should define all input variables, outputs.tf should define all outputs, and README.md should provide documentation on how to use the module. For larger modules, consider using additional files like providers.tf and versions.tf.",
+		Tags:        []string{"modules", "structure", "organization"},
+		References:  []string{"https://developer.hashicorp.com/terraform/language/modules/develop/structure"},
+	}
+
+	// Marshal to JSON
+	content, err := json.Marshal(moduleStructurePractice)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
+		i.logger.Error("Failed to marshal best practice", "id", moduleStructurePractice.ID, "error", err)
+		return
 	}
-	
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
-			continue
-		}
-		
-		path := filepath.Join(i.sourcePath, file.Name())
-		data, err := ioutil.ReadFile(path)
-		if err != nil {
-			i.logger.Error("Failed to read file", "path", path, "error", err)
-			continue
-		}
-		
-		var doc Document
-		if err := json.Unmarshal(data, &doc); err != nil {
-			i.logger.Error("Failed to unmarshal document", "path", path, "error", err)
-			continue
-		}
-		
-		// Use the filename without extension as the ID if not set
-		if doc.ID == "" {
-			doc.ID = strings.TrimSuffix(file.Name(), ".json")
-		}
-		
-		docs[doc.ID] = doc
+
+	// Add to resources
+	uri := fmt.Sprintf("%s:%s/%s", ResourceTypeBestPractice, moduleStructurePractice.Category, moduleStructurePractice.ID)
+	i.resources[uri] = &Resource{
+		URI:     uri,
+		Type:    ResourceTypeBestPractice,
+		Content: content,
 	}
-	
-	return docs, nil
+
+	// Variables documentation best practice
+	variablesPractice := BestPracticeDoc{
+		ID:          "variables-documentation",
+		Title:       "Document Variables with Description",
+		Category:    "documentation",
+		Description: "Always include a description for all variables",
+		Content:     "All variables in a Terraform module should include a description attribute that explains the purpose of the variable, expected values, and any constraints. This helps users understand how to use the module correctly. Additionally, variables should have an explicit type and, where appropriate, a default value or validation rules.",
+		Tags:        []string{"variables", "documentation"},
+		References:  []string{"https://developer.hashicorp.com/terraform/language/values/variables"},
+	}
+
+	// Marshal to JSON
+	content, err = json.Marshal(variablesPractice)
+	if err != nil {
+		i.logger.Error("Failed to marshal best practice", "id", variablesPractice.ID, "error", err)
+		return
+	}
+
+	// Add to resources
+	uri = fmt.Sprintf("%s:%s/%s", ResourceTypeBestPractice, variablesPractice.Category, variablesPractice.ID)
+	i.resources[uri] = &Resource{
+		URI:     uri,
+		Type:    ResourceTypeBestPractice,
+		Content: content,
+	}
+
+	// Tagging best practice
+	taggingPractice := BestPracticeDoc{
+		ID:          "consistent-tagging",
+		Title:       "Consistent Resource Tagging",
+		Category:    "organization",
+		Description: "Apply consistent tags to all resources",
+		Content:     "Apply a consistent set of tags to all resources for easier management, cost allocation, and resource organization. Use a map variable for tags that can be set at the root module level and passed to all nested modules. This allows for centralized tag management and ensures consistency across resources. Consider implementing mandatory tags for environment, project, owner, and cost center.",
+		Tags:        []string{"tagging", "organization"},
+		References:  []string{"https://developer.hashicorp.com/terraform/tutorials/modules/pattern-module-composition"},
+	}
+
+	// Marshal to JSON
+	content, err = json.Marshal(taggingPractice)
+	if err != nil {
+		i.logger.Error("Failed to marshal best practice", "id", taggingPractice.ID, "error", err)
+		return
+	}
+
+	// Add to resources
+	uri = fmt.Sprintf("%s:%s/%s", ResourceTypeBestPractice, taggingPractice.Category, taggingPractice.ID)
+	i.resources[uri] = &Resource{
+		URI:     uri,
+		Type:    ResourceTypeBestPractice,
+		Content: content,
+	}
+
+	// AWS specific best practice
+	awsSecurityPractice := BestPracticeDoc{
+		ID:          "security-group-rules",
+		Title:       "Security Group Rules",
+		Category:    "security",
+		Description: "Follow security best practices for security group rules",
+		Content:     "When defining security group rules, always follow the principle of least privilege. Avoid overly permissive rules such as allowing all ingress traffic (0.0.0.0/0) for ports other than HTTP/HTTPS. Use specific CIDR blocks or security group references instead. Separate security groups by function, and document each rule with a description attribute. Use a dedicated security groups module for reusable patterns.",
+		Provider:    "aws",
+		Tags:        []string{"security", "aws"},
+		References:  []string{"https://docs.aws.amazon.com/vpc/latest/userguide/VPC_SecurityGroups.html"},
+	}
+
+	// Marshal to JSON
+	content, err = json.Marshal(awsSecurityPractice)
+	if err != nil {
+		i.logger.Error("Failed to marshal best practice", "id", awsSecurityPractice.ID, "error", err)
+		return
+	}
+
+	// Add to resources
+	uri = fmt.Sprintf("%s:%s/%s", ResourceTypeBestPractice, awsSecurityPractice.Category, awsSecurityPractice.ID)
+	i.resources[uri] = &Resource{
+		URI:     uri,
+		Type:    ResourceTypeBestPractice,
+		Content: content,
+	}
+
+	// Version pinning best practice
+	versionPinningPractice := BestPracticeDoc{
+		ID:          "version-pinning",
+		Title:       "Version Pinning",
+		Category:    "stability",
+		Description: "Pin provider and module versions for stability",
+		Content:     "Always pin provider and module versions to ensure stability and predictability. Use the version attribute in the provider block to specify the provider version. For modules, use the version attribute in the module block to specify the module version. This prevents automatic updates that could introduce breaking changes. Use semantic versioning constraints to allow compatible updates while preventing breaking changes.",
+		Tags:        []string{"versioning", "stability"},
+		References:  []string{"https://developer.hashicorp.com/terraform/language/providers/requirements"},
+	}
+
+	// Marshal to JSON
+	content, err = json.Marshal(versionPinningPractice)
+	if err != nil {
+		i.logger.Error("Failed to marshal best practice", "id", versionPinningPractice.ID, "error", err)
+		return
+	}
+
+	// Add to resources
+	uri = fmt.Sprintf("%s:%s/%s", ResourceTypeBestPractice, versionPinningPractice.Category, versionPinningPractice.ID)
+	i.resources[uri] = &Resource{
+		URI:     uri,
+		Type:    ResourceTypeBestPractice,
+		Content: content,
+	}
 }
 
-// fetchFromAuthoritySources fetches documents from authority web sources
-func (i *Indexer) fetchFromAuthoritySources(ctx context.Context) (map[string]Document, error) {
-	docs := make(map[string]Document)
-	
-	for _, url := range i.authoritySources {
-		// This is a simplified example - in a real implementation, 
-		// you would use a proper HTML parser and extract structured data
-		
-		// Generate an ID from the URL
-		id := GenerateIDFromURL(url)
-		
-		// Set up a descriptive title based on the URL
-		title := "Terraform Best Practices"
-		if strings.Contains(url, "modules/develop") {
-			title = "Terraform Module Development Guide"
-		} else if strings.Contains(url, "style") {
-			title = "Terraform Style Guide"
-		} else if strings.Contains(url, "workflows") {
-			title = "Terraform Workflows"
-		} else if strings.Contains(url, "pro-cert") {
-			title = "Terraform Authoring and Operations Pro"
-		}
-		
-		// Set up tags and category based on URL pattern
-		tags := []string{"best-practice", "hashicorp"}
-		category := "terraform"
-		
-		if strings.Contains(url, "modules") {
-			tags = append(tags, "module", "structure")
-			category = "module-structure"
-		} else if strings.Contains(url, "style") {
-			tags = append(tags, "style", "conventions")
-			category = "style"
-		} else if strings.Contains(url, "workflows") {
-			tags = append(tags, "workflow", "process")
-			category = "workflow"
-		} else if strings.Contains(url, "pro-cert") {
-			tags = append(tags, "certification", "best-practice")
-			category = "certification"
-		}
-		
-		doc := Document{
-			ID:       id,
-			Title:    title,
-			URL:      url,
-			Category: category,
-			Tags:     tags,
-			Metadata: map[string]string{
-				"source": "HashiCorp",
+// addDefaultModuleStructures adds default module structures
+func (i *Indexer) addDefaultModuleStructures() {
+	// Basic module structure
+	basicModuleStructure := ModuleStructureDoc{
+		Type:        "basic",
+		Description: "Standard structure for a basic Terraform module",
+		Files: []ModuleStructureFile{
+			{
+				Name:        "main.tf",
+				Description: "Contains the main resources of the module",
+				Required:    true,
+				Content:     "# main.tf\n# Contains the main resources of the module\n\nresource \"aws_example\" \"this\" {\n  name = var.name\n  # other attributes\n}",
 			},
-			LastUpdated: time.Now(),
+			{
+				Name:        "variables.tf",
+				Description: "Contains the input variables for the module",
+				Required:    true,
+				Content:     "# variables.tf\n# Contains the input variables for the module\n\nvariable \"name\" {\n  description = \"The name to be used for resources created by this module\"\n  type        = string\n}\n\nvariable \"tags\" {\n  description = \"A map of tags to add to all resources\"\n  type        = map(string)\n  default     = {}\n}",
+			},
+			{
+				Name:        "outputs.tf",
+				Description: "Contains the outputs from the module",
+				Required:    true,
+				Content:     "# outputs.tf\n# Contains the outputs from the module\n\noutput \"id\" {\n  description = \"The ID of the resource\"\n  value       = aws_example.this.id\n}",
+			},
+			{
+				Name:        "README.md",
+				Description: "Contains documentation for the module",
+				Required:    true,
+				Content:     "# Example Module\n\nThis module manages an example resource.\n\n## Usage\n\n```hcl\nmodule \"example\" {\n  source = \"./example\"\n\n  name = \"example\"\n  tags = {\n    Environment = \"production\"\n  }\n}\n```\n\n## Requirements\n\n| Name | Version |\n|------|--------|\n| terraform | >= 1.0 |\n| aws | >= 4.0 |\n\n## Inputs\n\n| Name | Description | Type | Default | Required |\n|------|-------------|------|---------|:--------:|\n| name | The name to be used for resources created by this module | `string` | n/a | yes |\n| tags | A map of tags to add to all resources | `map(string)` | `{}` | no |\n\n## Outputs\n\n| Name | Description |\n|------|-------------|\n| id | The ID of the resource |",
+			},
+			{
+				Name:        "versions.tf",
+				Description: "Contains provider and terraform version constraints",
+				Required:    false,
+				Content:     "# versions.tf\n# Contains provider and terraform version constraints\n\nterraform {\n  required_version = \">= 1.0.0\"\n\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \">= 4.0.0\"\n    }\n  }\n}",
+			},
+		},
+		Examples: []string{
+			"module \"example\" {\n  source = \"./example\"\n\n  name = \"example\"\n  tags = {\n    Environment = \"production\"\n  }\n}",
+		},
+		References: []string{
+			"https://developer.hashicorp.com/terraform/language/modules/develop/structure",
+		},
+	}
+
+	// Marshal to JSON
+	content, err := json.Marshal(basicModuleStructure)
+	if err != nil {
+		i.logger.Error("Failed to marshal module structure", "type", basicModuleStructure.Type, "error", err)
+		return
+	}
+
+	// Add to resources
+	uri := fmt.Sprintf("%s:generic/%s", ResourceTypeModuleStructure, basicModuleStructure.Type)
+	i.resources[uri] = &Resource{
+		URI:     uri,
+		Type:    ResourceTypeModuleStructure,
+		Content: content,
+	}
+
+	// AWS module structure
+	awsModuleStructure := ModuleStructureDoc{
+		Type:        "aws",
+		Description: "Standard structure for an AWS-focused Terraform module",
+		Files: []ModuleStructureFile{
+			{
+				Name:        "main.tf",
+				Description: "Contains the main resources of the module",
+				Required:    true,
+				Content:     "# main.tf\n# Contains the main resources of the module\n\nresource \"aws_example\" \"this\" {\n  name = var.name\n  # other attributes\n}\n\nresource \"aws_security_group\" \"this\" {\n  name        = \"${var.name}-sg\"\n  description = \"Security group for ${var.name}\"\n  vpc_id      = var.vpc_id\n\n  tags = merge(\n    {\n      Name = \"${var.name}-sg\"\n    },\n    var.tags\n  )\n}",
+			},
+			{
+				Name:        "variables.tf",
+				Description: "Contains the input variables for the module",
+				Required:    true,
+				Content:     "# variables.tf\n# Contains the input variables for the module\n\nvariable \"name\" {\n  description = \"The name to be used for resources created by this module\"\n  type        = string\n}\n\nvariable \"vpc_id\" {\n  description = \"The ID of the VPC where resources will be created\"\n  type        = string\n}\n\nvariable \"tags\" {\n  description = \"A map of tags to add to all resources\"\n  type        = map(string)\n  default     = {}\n}",
+			},
+			{
+				Name:        "outputs.tf",
+				Description: "Contains the outputs from the module",
+				Required:    true,
+				Content:     "# outputs.tf\n# Contains the outputs from the module\n\noutput \"id\" {\n  description = \"The ID of the resource\"\n  value       = aws_example.this.id\n}\n\noutput \"security_group_id\" {\n  description = \"The ID of the security group\"\n  value       = aws_security_group.this.id\n}",
+			},
+			{
+				Name:        "README.md",
+				Description: "Contains documentation for the module",
+				Required:    true,
+				Content:     "# AWS Example Module\n\nThis module manages AWS resources.\n\n## Usage\n\n```hcl\nmodule \"example\" {\n  source = \"./example\"\n\n  name   = \"example\"\n  vpc_id = \"vpc-12345678\"\n  tags   = {\n    Environment = \"production\"\n  }\n}\n```\n\n## Requirements\n\n| Name | Version |\n|------|--------|\n| terraform | >= 1.0 |\n| aws | >= 4.0 |\n\n## Inputs\n\n| Name | Description | Type | Default | Required |\n|------|-------------|------|---------|:--------:|\n| name | The name to be used for resources created by this module | `string` | n/a | yes |\n| vpc_id | The ID of the VPC where resources will be created | `string` | n/a | yes |\n| tags | A map of tags to add to all resources | `map(string)` | `{}` | no |\n\n## Outputs\n\n| Name | Description |\n|------|-------------|\n| id | The ID of the resource |\n| security_group_id | The ID of the security group |",
+			},
+			{
+				Name:        "versions.tf",
+				Description: "Contains provider and terraform version constraints",
+				Required:    true,
+				Content:     "# versions.tf\n# Contains provider and terraform version constraints\n\nterraform {\n  required_version = \">= 1.0.0\"\n\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \">= 4.0.0\"\n    }\n  }\n}",
+			},
+		},
+		Provider: "aws",
+		Examples: []string{
+			"module \"example\" {\n  source = \"./example\"\n\n  name   = \"example\"\n  vpc_id = \"vpc-12345678\"\n  tags   = {\n    Environment = \"production\"\n  }\n}",
+		},
+		References: []string{
+			"https://developer.hashicorp.com/terraform/language/modules/develop/structure",
+			"https://registry.terraform.io/providers/hashicorp/aws/latest/docs",
+		},
+	}
+
+	// Marshal to JSON
+	content, err = json.Marshal(awsModuleStructure)
+	if err != nil {
+		i.logger.Error("Failed to marshal module structure", "type", awsModuleStructure.Type, "error", err)
+		return
+	}
+
+	// Add to resources
+	uri = fmt.Sprintf("%s:%s/%s", ResourceTypeModuleStructure, awsModuleStructure.Provider, awsModuleStructure.Type)
+	i.resources[uri] = &Resource{
+		URI:     uri,
+		Type:    ResourceTypeModuleStructure,
+		Content: content,
+	}
+}
+
+// ListResources lists resources matching a pattern
+func (i *Indexer) ListResources(ctx context.Context, pattern string) ([]string, error) {
+	i.mutex.RLock()
+	defer i.mutex.RUnlock()
+
+	var uris []string
+	for uri := range i.resources {
+		if strings.HasPrefix(uri, pattern) {
+			uris = append(uris, uri)
 		}
-		
-		// In a real implementation, you would fetch and parse the content
-		resp, err := http.Get(url)
-		if err != nil {
-			i.logger.Error("Failed to fetch document", "url", url, "error", err)
+	}
+
+	return uris, nil
+}
+
+// GetResource gets a resource by URI
+func (i *Indexer) GetResource(ctx context.Context, uri string) (json.RawMessage, error) {
+	i.mutex.RLock()
+	defer i.mutex.RUnlock()
+
+	resource, ok := i.resources[uri]
+	if !ok {
+		return nil, fmt.Errorf("resource not found: %s", uri)
+	}
+
+	return resource.Content, nil
+}
+
+// GetBestPractices gets best practices
+func (i *Indexer) GetBestPractices(topic, category, provider string, keywords []string) ([]BestPracticeDoc, error) {
+	i.mutex.RLock()
+	defer i.mutex.RUnlock()
+
+	var practices []BestPracticeDoc
+	for uri, resource := range i.resources {
+		if resource.Type != ResourceTypeBestPractice {
 			continue
 		}
-		defer resp.Body.Close()
-		
-		if resp.StatusCode != http.StatusOK {
-			i.logger.Error("Failed to fetch document", "url", url, "statusCode", resp.StatusCode)
+
+		// Parse the resource content
+		var practice BestPracticeDoc
+		if err := json.Unmarshal(resource.Content, &practice); err != nil {
+			i.logger.Error("Failed to unmarshal best practice", "uri", uri, "error", err)
 			continue
 		}
-		
-		content, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			i.logger.Error("Failed to read document content", "url", url, "error", err)
+
+		// Apply filters
+		if topic != "" && !strings.Contains(strings.ToLower(practice.Title), strings.ToLower(topic)) && !strings.Contains(strings.ToLower(practice.Description), strings.ToLower(topic)) {
 			continue
 		}
-		
-		// Set the content - in a real implementation, you would parse the HTML
-		doc.Content = extractContentFromHTML(string(content))
-		
-		// Add to the collection
-		docs[doc.ID] = doc
-	}
-	
-	return docs, nil
-}
 
-// GenerateIDFromURL generates a unique ID from a URL
-func GenerateIDFromURL(url string) string {
-	// Strip protocol
-	id := strings.ReplaceAll(
-		strings.TrimPrefix(
-			strings.TrimPrefix(url, "https://"), 
-			"http://"),
-		"/", "-")
-	
-	// Further cleanup to make a nice ID
-	id = strings.ReplaceAll(id, ".", "-")
-	id = strings.ReplaceAll(id, "--", "-")
-	
-	// Trim any trailing dash
-	id = strings.TrimSuffix(id, "-")
-	
-	return id
-}
-
-// extractContentFromHTML extracts the main content from HTML
-// This is a simplified implementation - in a real implementation, you would use a proper HTML parser
-func extractContentFromHTML(html string) string {
-	// Find main content area - this is very simplistic and would need to be improved
-	// with a proper HTML parser in a real implementation
-	mainStart := strings.Index(html, "<main")
-	if mainStart == -1 {
-		mainStart = strings.Index(html, "<article")
-	}
-	if mainStart == -1 {
-		mainStart = strings.Index(html, "<div class=\"content")
-	}
-	if mainStart == -1 {
-		return "Failed to extract content from HTML"
-	}
-	
-	mainEnd := strings.Index(html[mainStart:], "</main>")
-	if mainEnd == -1 {
-		mainEnd = strings.Index(html[mainStart:], "</article>")
-	}
-	if mainEnd == -1 {
-		mainEnd = strings.Index(html[mainStart:], "</div>")
-	}
-	if mainEnd == -1 {
-		return "Failed to extract content from HTML"
-	}
-	
-	content := html[mainStart:mainStart+mainEnd]
-	
-	// Strip HTML tags (very simplistic approach)
-	for {
-		tagStart := strings.Index(content, "<")
-		if tagStart == -1 {
-			break
+		if category != "" && practice.Category != category {
+			continue
 		}
-		
-		tagEnd := strings.Index(content[tagStart:], ">")
-		if tagEnd == -1 {
-			break
+
+		if provider != "" && practice.Provider != provider {
+			continue
 		}
-		
-		content = content[:tagStart] + " " + content[tagStart+tagEnd+1:]
-	}
-	
-	// Clean up whitespace
-	content = strings.ReplaceAll(content, "\n", " ")
-	content = strings.ReplaceAll(content, "\t", " ")
-	for strings.Contains(content, "  ") {
-		content = strings.ReplaceAll(content, "  ", " ")
-	}
-	
-	return strings.TrimSpace(content)
-}
 
-// GetDocument returns a document by ID
-func (i *Indexer) GetDocument(id string) (Document, bool) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	
-	doc, exists := i.documents[id]
-	return doc, exists
-}
+		if len(keywords) > 0 {
+			match := false
+			for _, keyword := range keywords {
+				keyword = strings.ToLower(keyword)
+				if strings.Contains(strings.ToLower(practice.Title), keyword) ||
+					strings.Contains(strings.ToLower(practice.Description), keyword) ||
+					strings.Contains(strings.ToLower(practice.Content), keyword) {
+					match = true
+					break
+				}
 
-// FindDocumentsByCategory returns documents in a category
-func (i *Indexer) FindDocumentsByCategory(category string) []Document {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	
-	var docs []Document
-	for _, id := range i.categories[category] {
-		if doc, exists := i.documents[id]; exists {
-			docs = append(docs, doc)
+				// Check tags
+				for _, tag := range practice.Tags {
+					if strings.Contains(strings.ToLower(tag), keyword) {
+						match = true
+						break
+					}
+				}
+			}
+
+			if !match {
+				continue
+			}
 		}
+
+		practices = append(practices, practice)
 	}
-	
-	return docs
+
+	return practices, nil
 }
 
-// FindDocumentsByTag returns documents with a specific tag
-func (i *Indexer) FindDocumentsByTag(tag string) []Document {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	
-	var docs []Document
-	for _, id := range i.tags[tag] {
-		if doc, exists := i.documents[id]; exists {
-			docs = append(docs, doc)
+// GetModuleStructures gets module structures
+func (i *Indexer) GetModuleStructures(structureType, provider string) ([]ModuleStructureDoc, error) {
+	i.mutex.RLock()
+	defer i.mutex.RUnlock()
+
+	var structures []ModuleStructureDoc
+	for uri, resource := range i.resources {
+		if resource.Type != ResourceTypeModuleStructure {
+			continue
 		}
-	}
-	
-	return docs
-}
 
-// GetAllDocuments returns all indexed documents
-func (i *Indexer) GetAllDocuments() []Document {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	
-	docs := make([]Document, 0, len(i.documents))
-	for _, doc := range i.documents {
-		docs = append(docs, doc)
-	}
-	
-	return docs
-}
+		// Parse the resource content
+		var structure ModuleStructureDoc
+		if err := json.Unmarshal(resource.Content, &structure); err != nil {
+			i.logger.Error("Failed to unmarshal module structure", "uri", uri, "error", err)
+			continue
+		}
 
-// GetAuthoritySources returns the configured authority sources
-func (i *Indexer) GetAuthoritySources() []string {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	
-	// Return a copy to avoid external modification
-	sources := make([]string, len(i.authoritySources))
-	copy(sources, i.authoritySources)
-	
-	return sources
+		// Apply filters
+		if structureType != "" && structure.Type != structureType {
+			continue
+		}
+
+		if provider != "" && structure.Provider != provider {
+			continue
+		}
+
+		structures = append(structures, structure)
+	}
+
+	return structures, nil
 }
+</content>
