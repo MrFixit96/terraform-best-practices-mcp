@@ -85,11 +85,11 @@ func NewServer(config Config, logger Logger) (*Server, error) {
 	)
 	
 	patternRepo := tfdocs.NewPatternRepository(config.PatternPath, logger)
-	resourceProvider := tfdocs.NewResourceProvider(docIndexer, patternRepo, logger)
+	resourceProvider := tfdocs.NewResourceProvider(docIndexer, logger)
 	validationEngine := tfdocs.NewValidationEngine(docIndexer, logger)
 	
 	// Create MCP server
-	mcpServer := mcp.NewServer(resourceProvider, logger)
+	mcpServer := mcp.NewServer(logger)
 	
 	return &Server{
 		mcpServer:        mcpServer,
@@ -106,23 +106,13 @@ func (s *Server) Initialize(ctx context.Context) error {
 	s.logger.Info("Initializing HashiCorp MCP server")
 	
 	// Initialize the documentation indexer
-	if err := s.docIndexer.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start documentation indexer: %w", err)
+	if err := s.docIndexer.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize documentation indexer: %w", err)
 	}
 	
 	// Initialize the pattern repository
-	if err := s.patternRepo.Initialize(ctx); err != nil {
+	if err := s.patternRepo.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize pattern repository: %w", err)
-	}
-	
-	// Initialize the resource provider
-	if err := s.resourceProvider.Initialize(ctx); err != nil {
-		return fmt.Errorf("failed to initialize resource provider: %w", err)
-	}
-	
-	// Initialize the validation engine
-	if err := s.validationEngine.Initialize(ctx); err != nil {
-		return fmt.Errorf("failed to initialize validation engine: %w", err)
 	}
 	
 	// Register the tools
@@ -135,10 +125,11 @@ func (s *Server) Initialize(ctx context.Context) error {
 // registerTools registers the MCP tools
 func (s *Server) registerTools() {
 	// Register the documentation tools
-	s.mcpServer.AddTool(NewGetBestPracticesToolTool(s.resourceProvider, s.logger))
-	s.mcpServer.AddTool(NewGetModuleStructureTool(s.resourceProvider, s.logger))
+	s.mcpServer.AddTool(NewGetBestPracticesTool(s.docIndexer, s.resourceProvider, s.logger))
+	s.mcpServer.AddTool(NewGetModuleStructureTool(s.docIndexer, s.resourceProvider, s.logger))
 	s.mcpServer.AddTool(NewGetPatternTemplateTool(s.patternRepo, s.logger))
 	s.mcpServer.AddTool(NewValidateConfigurationTool(s.validationEngine, s.logger))
+	s.mcpServer.AddTool(NewSuggestImprovementsTool(s.validationEngine, s.logger))
 }
 
 // AddTool registers a tool with the server
@@ -164,21 +155,31 @@ type DefaultLogger struct {
 
 // Info logs an info message
 func (l *DefaultLogger) Info(msg string, fields ...interface{}) {
-	args := []interface{}{msg}
-	args = append(args, fields...)
+	if len(fields) == 0 {
+		l.Printf("INFO: %s", msg)
+		return
+	}
+	
 	l.Printf("INFO: %s %v", msg, fields)
 }
 
 // Error logs an error message
 func (l *DefaultLogger) Error(msg string, fields ...interface{}) {
-	args := []interface{}{msg}
-	args = append(args, fields...)
+	if len(fields) == 0 {
+		l.Printf("ERROR: %s", msg)
+		return
+	}
+	
 	l.Printf("ERROR: %s %v", msg, fields)
 }
 
 // Debug logs a debug message
 func (l *DefaultLogger) Debug(msg string, fields ...interface{}) {
-	args := []interface{}{msg}
-	args = append(args, fields...)
+	if len(fields) == 0 {
+		l.Printf("DEBUG: %s", msg)
+		return
+	}
+	
 	l.Printf("DEBUG: %s %v", msg, fields)
 }
+</content>
