@@ -61,23 +61,12 @@ Validates Terraform configurations against best practices:
 
 #### Windows (PowerShell 7)
 
-1. **Install Prerequisites**
+1. **Install Prerequisites with Windows Package Manager (winget)**
 
    Install Go:
    ```powershell
-   # Download Go using PowerShell
-   $goVersion = "1.19.3"
-   $goInstallerUrl = "https://golang.org/dl/go${goVersion}.windows-amd64.msi"
-   $goInstallerPath = "$env:TEMP\go${goVersion}.windows-amd64.msi"
-   
-   # Download the installer
-   Invoke-WebRequest -Uri $goInstallerUrl -OutFile $goInstallerPath
-   
-   # Run the installer
-   Start-Process -FilePath $goInstallerPath -ArgumentList "/quiet" -Wait
-   
-   # Refresh environment variables
-   $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+   # Install Go using winget
+   winget install GoLang.Go
    
    # Verify installation
    go version
@@ -85,21 +74,26 @@ Validates Terraform configurations against best practices:
 
    Install Git:
    ```powershell
-   # Download Git using PowerShell
-   $gitVersion = "2.39.2"
-   $gitInstallerUrl = "https://github.com/git-for-windows/git/releases/download/v${gitVersion}.windows.1/Git-${gitVersion}-64-bit.exe"
-   $gitInstallerPath = "$env:TEMP\Git-${gitVersion}-64-bit.exe"
-   
-   # Download the installer
-   Invoke-WebRequest -Uri $gitInstallerUrl -OutFile $gitInstallerPath
-   
-   # Run the installer (silent mode)
-   Start-Process -FilePath $gitInstallerPath -ArgumentList "/VERYSILENT /NORESTART /NOCANCEL" -Wait
-   
-   # Refresh environment variables
-   $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+   # Install Git using winget
+   winget install Git.Git
    
    # Verify installation
+   git --version
+   ```
+
+   Alternative using Scoop package manager:
+   ```powershell
+   # Install Scoop if not already installed
+   if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+     Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+   }
+   
+   # Install Go and Git using Scoop
+   scoop install go git
+   
+   # Verify installations
+   go version
    git --version
    ```
 
