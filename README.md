@@ -59,15 +59,25 @@ Validates Terraform configurations against best practices:
 
 ### Platform-Specific Setup Instructions
 
-#### Windows (PowerShell)
+#### Windows (PowerShell 7)
 
 1. **Install Prerequisites**
 
    Install Go:
    ```powershell
-   # Download the latest Go MSI installer and install it
-   # Or use Chocolatey
-   choco install golang
+   # Download Go using PowerShell
+   $goVersion = "1.19.3"
+   $goInstallerUrl = "https://golang.org/dl/go${goVersion}.windows-amd64.msi"
+   $goInstallerPath = "$env:TEMP\go${goVersion}.windows-amd64.msi"
+   
+   # Download the installer
+   Invoke-WebRequest -Uri $goInstallerUrl -OutFile $goInstallerPath
+   
+   # Run the installer
+   Start-Process -FilePath $goInstallerPath -ArgumentList "/quiet" -Wait
+   
+   # Refresh environment variables
+   $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
    
    # Verify installation
    go version
@@ -75,9 +85,19 @@ Validates Terraform configurations against best practices:
 
    Install Git:
    ```powershell
-   # Download Git for Windows and install it
-   # Or use Chocolatey
-   choco install git
+   # Download Git using PowerShell
+   $gitVersion = "2.39.2"
+   $gitInstallerUrl = "https://github.com/git-for-windows/git/releases/download/v${gitVersion}.windows.1/Git-${gitVersion}-64-bit.exe"
+   $gitInstallerPath = "$env:TEMP\Git-${gitVersion}-64-bit.exe"
+   
+   # Download the installer
+   Invoke-WebRequest -Uri $gitInstallerUrl -OutFile $gitInstallerPath
+   
+   # Run the installer (silent mode)
+   Start-Process -FilePath $gitInstallerPath -ArgumentList "/VERYSILENT /NORESTART /NOCANCEL" -Wait
+   
+   # Refresh environment variables
+   $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
    
    # Verify installation
    git --version
