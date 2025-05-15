@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"terraform-mcp-server/pkg/hashicorp"
+	"terraform-mcp-server/pkg/hashicorp/tfdocs"
 )
 
 // Configuration options
@@ -23,6 +25,7 @@ type config struct {
 	DataDir         string
 	UpdateInterval  time.Duration
 	LogLevel        string
+	AuthoritySources string
 }
 
 func main() {
@@ -36,11 +39,25 @@ func main() {
 	
 	logger.Info("Starting Terraform MCP Server")
 	
+	// Parse authority sources
+	var authoritySources []string
+	if cfg.AuthoritySources != "" {
+		authoritySources = strings.Split(cfg.AuthoritySources, ",")
+		for i, source := range authoritySources {
+			authoritySources[i] = strings.TrimSpace(source)
+		}
+		logger.Info("Using custom authority sources", "count", len(authoritySources))
+	} else {
+		authoritySources = tfdocs.DefaultAuthoritySources
+		logger.Info("Using default authority sources", "count", len(authoritySources))
+	}
+	
 	// Create server configuration
 	serverConfig := hashicorp.Config{
-		DocSourcePath:  cfg.DocSourcePath,
-		PatternPath:    cfg.PatternPath,
-		UpdateInterval: cfg.UpdateInterval,
+		DocSourcePath:    cfg.DocSourcePath,
+		PatternPath:      cfg.PatternPath,
+		UpdateInterval:   cfg.UpdateInterval,
+		AuthoritySources: authoritySources,
 	}
 	
 	// Create server
@@ -95,6 +112,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.DataDir, "data-dir", defaultDataDir, "Data directory")
 	flag.StringVar(&cfg.LogLevel, "log-level", "info", "Log level (debug, info, error)")
 	flag.DurationVar(&cfg.UpdateInterval, "update-interval", 24*time.Hour, "Update interval for documentation")
+	flag.StringVar(&cfg.AuthoritySources, "authority-sources", "", "Comma-separated list of authority sources for Terraform documentation")
 	
 	// Parse flags
 	flag.Parse()
