@@ -57,34 +57,173 @@ Validates Terraform configurations against best practices:
 - Go 1.17 or later
 - Git
 
-### Building the Server
+### Platform-Specific Setup Instructions
+
+#### Windows (PowerShell)
+
+1. **Install Prerequisites**
+
+   Install Go:
+   ```powershell
+   # Download the latest Go MSI installer and install it
+   # Or use Chocolatey
+   choco install golang
+   
+   # Verify installation
+   go version
+   ```
+
+   Install Git:
+   ```powershell
+   # Download Git for Windows and install it
+   # Or use Chocolatey
+   choco install git
+   
+   # Verify installation
+   git --version
+   ```
+
+2. **Clone and Build**
+
+   ```powershell
+   # Clone the repository
+   git clone https://github.com/MrFixit96/terraform-best-practices-mcp.git
+   cd terraform-best-practices-mcp
+   
+   # Build the binary
+   go build -o terraform-mcp-server.exe .\cmd\terraform-mcp-server
+   ```
+
+3. **Run the Server**
+
+   ```powershell
+   # Start the server on port 8080
+   .\terraform-mcp-server.exe -addr :8080
+   
+   # With custom data directory
+   .\terraform-mcp-server.exe -addr :8080 -data-dir .\my-data
+   
+   # With debug logging
+   .\terraform-mcp-server.exe -addr :8080 -log-level debug
+   ```
+
+#### macOS
+
+1. **Install Prerequisites**
+
+   Install Go:
+   ```bash
+   # Use Homebrew
+   brew install go
+   
+   # Verify installation
+   go version
+   ```
+
+   Install Git:
+   ```bash
+   # Use Homebrew
+   brew install git
+   
+   # Verify installation
+   git --version
+   ```
+
+2. **Clone and Build**
+
+   ```bash
+   # Clone the repository
+   git clone https://github.com/MrFixit96/terraform-best-practices-mcp.git
+   cd terraform-best-practices-mcp
+   
+   # Build the binary
+   go build -o terraform-mcp-server ./cmd/terraform-mcp-server
+   ```
+
+3. **Run the Server**
+
+   ```bash
+   # Start the server on port 8080
+   ./terraform-mcp-server -addr :8080
+   
+   # With custom data directory
+   ./terraform-mcp-server -addr :8080 -data-dir ./my-data
+   
+   # With debug logging
+   ./terraform-mcp-server -addr :8080 -log-level debug
+   ```
+
+#### Linux (Bash)
+
+1. **Install Prerequisites**
+
+   Install Go:
+   ```bash
+   # Debian/Ubuntu
+   sudo apt update
+   sudo apt install golang-go
+   
+   # RHEL/CentOS/Fedora
+   sudo dnf install golang
+   
+   # Verify installation
+   go version
+   ```
+
+   Install Git:
+   ```bash
+   # Debian/Ubuntu
+   sudo apt update
+   sudo apt install git
+   
+   # RHEL/CentOS/Fedora
+   sudo dnf install git
+   
+   # Verify installation
+   git --version
+   ```
+
+2. **Clone and Build**
+
+   ```bash
+   # Clone the repository
+   git clone https://github.com/MrFixit96/terraform-best-practices-mcp.git
+   cd terraform-best-practices-mcp
+   
+   # Build the binary
+   go build -o terraform-mcp-server ./cmd/terraform-mcp-server
+   ```
+
+3. **Run the Server**
+
+   ```bash
+   # Start the server on port 8080
+   ./terraform-mcp-server -addr :8080
+   
+   # With custom data directory
+   ./terraform-mcp-server -addr :8080 -data-dir ./my-data
+   
+   # With debug logging
+   ./terraform-mcp-server -addr :8080 -log-level debug
+   
+   # Run as a background service
+   nohup ./terraform-mcp-server -addr :8080 > terraform-mcp.log 2>&1 &
+   ```
+
+### Docker Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/MrFixit96/terraform-best-practices-mcp.git
-cd terraform-best-practices-mcp
+# Build the Docker image
+docker build -t terraform-mcp-server .
 
-# Build the binary
-go build -o terraform-mcp-server ./cmd/terraform-mcp-server
+# Run the Docker container
+docker run -p 8080:8080 terraform-mcp-server
+
+# With custom configuration
+docker run -p 8080:8080 -e LOG_LEVEL=debug terraform-mcp-server
 ```
 
 ## Usage
-
-### Running the Server
-
-```bash
-# Start the server on port 8080
-./terraform-mcp-server -addr :8080
-
-# Specify custom data directory
-./terraform-mcp-server -addr :8080 -data-dir ./my-data
-
-# Configure log level
-./terraform-mcp-server -addr :8080 -log-level debug
-
-# Specify custom authority sources
-./terraform-mcp-server -addr :8080 -authority-sources "https://developer.hashicorp.com/terraform/language/modules/develop,https://developer.hashicorp.com/terraform/language/style"
-```
 
 ### Command-line Options
 
