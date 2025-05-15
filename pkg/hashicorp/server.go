@@ -33,17 +33,19 @@ type Logger interface {
 
 // Config represents the configuration for the HashiCorp MCP server
 type Config struct {
-	DocSourcePath string
-	PatternPath   string
-	UpdateInterval time.Duration
+	DocSourcePath    string
+	PatternPath      string
+	UpdateInterval   time.Duration
+	AuthoritySources []string
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() Config {
 	return Config{
-		DocSourcePath:  "data/docs",
-		PatternPath:    "data/patterns",
-		UpdateInterval: 24 * time.Hour,
+		DocSourcePath:    "data/docs",
+		PatternPath:      "data/patterns",
+		UpdateInterval:   24 * time.Hour,
+		AuthoritySources: tfdocs.DefaultAuthoritySources,
 	}
 }
 
@@ -66,10 +68,20 @@ func NewServer(config Config, logger Logger) (*Server, error) {
 	}
 
 	// Create core components
+	// Pass authority sources to the indexer if provided
+	indexerOptions := []tfdocs.IndexerOption{
+		tfdocs.WithUpdateInterval(config.UpdateInterval),
+	}
+	
+	// Add authority sources if provided
+	if len(config.AuthoritySources) > 0 {
+		indexerOptions = append(indexerOptions, tfdocs.WithAuthoritySources(config.AuthoritySources))
+	}
+	
 	docIndexer := tfdocs.NewIndexer(
 		config.DocSourcePath, 
 		logger, 
-		tfdocs.WithUpdateInterval(config.UpdateInterval),
+		indexerOptions...,
 	)
 	
 	patternRepo := tfdocs.NewPatternRepository(config.PatternPath, logger)
